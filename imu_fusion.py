@@ -5,11 +5,13 @@
 
 import pickle
 import sys
+import glob
 import numpy as np
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 
 from rotations import Quaternion, skew_symmetric
+from data.student_utils import StampedData
 sys.path.append('./data')
 
 #### 1. Data ###################################################################################
@@ -45,51 +47,60 @@ with open('data/p1_data.pkl', 'rb') as file:
 #     data: The actual data
 #     t: Timestamps in ms.
 ################################################################################################
-gt = data['gt']
-imu_f = data['imu_f']
-imu_w = data['imu_w']
 
-### TODO Cam is your data
-cam = data['gnss']
-lidar = data['lidar']
-### TODO: Assume you only have pitch data
-cam.data = cam.data[:,-1]
+# TODO Read IMU data
+#! IMU data come with 10 Hz
+imu_data = glob.glob('data/imu/*')
+imu_data.sort()
+imu_f = StampedData()
+imu_w = StampedData()
+for im_p in imu_data:
+    f = open(im_p, "r")
+    data = f.read()
+
+    angx = (float)(data.split('\n')[0].split(' ')[-1])
+    angy = (float)(data.split('\n')[1].split(' ')[-1])
+    angz = (float)(data.split('\n')[2].split(' ')[-1])
+    accx = (float)(data.split('\n')[3].split(' ')[-1])
+    accy = (float)(data.split('\n')[4].split(' ')[-1])
+    accz = (float)(data.split('\n')[5].split(' ')[-1])
+
+    imu_f.data.append(np.array([accx, accy, accz]))
+    imu_w.data.append(np.array([angx, angy, angz]))
+
+    stamp_p = im_p.split('/')[-1].split('.')[-2].split('_')
+    stamp = (float)(stamp_p[-2]) + (float)(stamp_p[-1])/1000000000.
+    imu_f.t.append(stamp)
+    imu_w.t.append(stamp)
+
+imu_f.convert_lists_to_numpy()
+imu_w.convert_lists_to_numpy()
+
+# TODO Read Cam estimateion data [height, roll, pitch]
+#! cam data come with 20 Hz, so we take half
+#? what's the angle unit
+cam_data = glob.glob('data/ground_est_raw/*')
+cam_data.sort()
+cam = StampedData()
+for cam_p in cam_data:
+    f = open(cam_p, "r")
+    data = f.read()
+
+    stamp_p = cam_p.split('/')[-1].split('.')[-2].split('_')
+    if ((int)(stamp_p[-1])%100000000) != 0:
+        continue
+    stamp = (float)(stamp_p[-2]) + (float)(stamp_p[-1])/1000000000.
+    cam.t.append(stamp)
+
+    pitch  = (float)(data.split('\n')[0].split(' ')[-1])*np.pi/180
+    roll   = (float)(data.split('\n')[1].split(' ')[-1])*np.pi/180
+    height = (float)(data.split('\n')[2].split(' ')[-1])*np.pi/180
+
+    cam.data.append(np.array([height, roll, pitch]))
+
+cam.convert_lists_to_numpy()
+
 ### TODO: Your Cam convariance is defined here
-var_cam = 0.1
-################################################################################################
-# Let's plot the ground truth trajectory to see what it looks like. When you're testing your
-# code later, feel free to comment this out.
-################################################################################################
-# gt_fig = plt.figure()
-# ax = gt_fig.add_subplot(111, projection='3d')
-# ax.plot(gt.p[:,0], gt.p[:,1], gt.p[:,2])
-# ax.set_xlabel('x [m]')
-# ax.set_ylabel('y [m]')
-# ax.set_zlabel('z [m]')
-# ax.set_title('Ground Truth trajectory')
-# ax.set_zlim(-1, 5)
-# plt.show()
-
-################################################################################################
-# Remember that our LIDAR data is actually just a set of positions estimated from a separate
-# scan-matching system, so we can just insert it into our solver as another position
-# measurement, just as we do for GNSS. However, the LIDAR frame is not the same as the frame
-# shared by the IMU and the GNSS. To remedy this, we transform the LIDAR data to the IMU frame
-# using our known extrinsic calibration rotation matrix C_li and translation vector t_li_i.
-#
-# THIS IS THE CODE YOU WILL MODIFY FOR PART 2 OF THE ASSIGNMENT.
-################################################################################################
-# This is the correct calibration rotation matrix, corresponding to an euler rotation of 0.05, 0.05, .1.
-C_li = np.array([
-    [ 0.99376, -0.09722,  0.05466],
-    [ 0.09971,  0.99401, -0.04475],
-    [-0.04998,  0.04992,  0.9975 ]
-])
-
-t_li_i = np.array([0.5, 0.1, 0.5])
-
-lidar.data = (C_li @ lidar.data.T).T + t_li_i
-
 
 #### 2. Constants ##############################################################################
 
@@ -100,7 +111,7 @@ lidar.data = (C_li @ lidar.data.T).T + t_li_i
 ################################################################################################
 var_imu_f = 0.01
 var_imu_w = 0.01
-var_lidar = 35
+var_cam = 0.001
 gravity = 9.81
 
 ################################################################################################
@@ -112,7 +123,10 @@ l_jac[3:, :] = np.eye(6)  # motion model noise jacobian
 h_jac = np.zeros([3, 9])
 h_jac[:, :3] = np.eye(3)  # measurement model jacobian
 q_jac = np.zeros([3, 9])
-q_jac[:, 6:] = np.eye(3)  # measurement model jacobian
+# q_jac[:, 6:] = np.eye(3)  # measurement model jacobian
+q_jac[0, 2] = 1  # 0 input is relative to 2 state (height)
+q_jac[1, 6] = 1  # 1 input is relative to 6 state (roll)
+q_jac[2, 7] = 1  # 2 input is relative to 7 state (pitch)
 
 #### 3. Initial Values #########################################################################
 
@@ -125,9 +139,10 @@ q_est = np.zeros([imu_f.data.shape[0], 4])  # orientation estimates as quaternio
 p_cov = np.zeros([imu_f.data.shape[0], 9, 9])  # covariance matrices at each timestep
 
 # Set initial values
-p_est[0] = gt.p[0]
-v_est[0] = gt.v[0]
-q_est[0] = Quaternion(euler=gt.r[0]).to_numpy()
+p_est[0] = np.array([0,0,0])
+v_est[0] = np.array([0,0,0])
+#! Initialization q with roll, pitch from cam
+q_est[0] = Quaternion(euler=np.array([cam.data[0][1], cam.data[0][2], 0.0])).to_numpy()
 p_cov[0] = np.eye(9)  # covariance of estimate
 
 #### 4. Measurement Update #####################################################################
@@ -163,9 +178,10 @@ def measurement_update_rotation(sensor_var, p_cov_check, y_k, p_check, v_check, 
     q_rpy = Quaternion(w=q_check[0], x=q_check[1], y=q_check[2], z=q_check[3]).to_euler()
 
     ## TODO: Here we only update yaw angle, and y_k is your current observation
-    o_k = q_rpy
-    o_k[2] = y_k
-    delta_x = K.dot(o_k - q_rpy)
+    #! est_k = [est_height, est_roll, est_pitch]
+    #! y_k = [cam_height, cam_roll, cam_pitch]
+    est_k = np.array([p_check[2], q_rpy[0], q_rpy[1]])
+    delta_x = K.dot(y_k - est_k)
 
     # 3.3 Correct predicted state
     p_check = p_check + delta_x[:3]
@@ -223,7 +239,7 @@ for k in range(1, imu_f.data.shape[0]):  # start at 1 b/c we have initial predic
 est_traj_fig = plt.figure()
 ax = est_traj_fig.add_subplot(111, projection='3d')
 ax.plot(p_est[:,0], p_est[:,1], p_est[:,2], label='Estimated')
-ax.plot(gt.p[:,0], gt.p[:,1], gt.p[:,2], label='Ground Truth')
+# ax.plot(gt.p[:,0], gt.p[:,1], gt.p[:,2], label='Ground Truth')
 ax.set_xlabel('x [m]')
 ax.set_ylabel('y [m]')
 ax.set_zlabel('z [m]')
@@ -237,29 +253,29 @@ plt.show()
 # included. The error estimates are in blue, and the uncertainty bounds are red and dashed.
 # The uncertainty bounds are +/- 3 standard deviations based on our uncertainty.
 ################################################################################################
-error_fig, ax = plt.subplots(2, 3)
-error_fig.suptitle('Error plots')
-num_gt = gt.p.shape[0]
-p_est_euler = []
+# error_fig, ax = plt.subplots(2, 3)
+# error_fig.suptitle('Error plots')
+# num_gt = gt.p.shape[0]
+# p_est_euler = []
 
-# Convert estimated quaternions to euler angles
-for q in q_est:
-    p_est_euler.append(Quaternion(*q).to_euler())
-p_est_euler = np.array(p_est_euler)
+# # Convert estimated quaternions to euler angles
+# for q in q_est:
+#     p_est_euler.append(Quaternion(*q).to_euler())
+# p_est_euler = np.array(p_est_euler)
 
-# Get uncertainty estimates from P matrix
-p_cov_diag_std = np.sqrt(np.diagonal(p_cov, axis1=1, axis2=2))
+# # Get uncertainty estimates from P matrix
+# p_cov_diag_std = np.sqrt(np.diagonal(p_cov, axis1=1, axis2=2))
 
-titles = ['x', 'y', 'z', 'x rot', 'y rot', 'z rot']
-for i in range(3):
-    ax[0, i].plot(range(num_gt), gt.p[:, i] - p_est[:num_gt, i])
-    ax[0, i].plot(range(num_gt), 3 * p_cov_diag_std[:num_gt, i], 'r--')
-    ax[0, i].plot(range(num_gt), -3 * p_cov_diag_std[:num_gt, i], 'r--')
-    ax[0, i].set_title(titles[i])
+# titles = ['x', 'y', 'z', 'x rot', 'y rot', 'z rot']
+# for i in range(3):
+#     # ax[0, i].plot(range(num_gt), gt.p[:, i] - p_est[:num_gt, i])
+#     ax[0, i].plot(range(num_gt), 3 * p_cov_diag_std[:num_gt, i], 'r--')
+#     ax[0, i].plot(range(num_gt), -3 * p_cov_diag_std[:num_gt, i], 'r--')
+#     ax[0, i].set_title(titles[i])
 
-for i in range(3):
-    ax[1, i].plot(range(num_gt), gt.r[:, i] - p_est_euler[:num_gt, i])
-    ax[1, i].plot(range(num_gt), 3 * p_cov_diag_std[:num_gt, i+6], 'r--')
-    ax[1, i].plot(range(num_gt), -3 * p_cov_diag_std[:num_gt, i+6], 'r--')
-    ax[1, i].set_title(titles[i+3])
-plt.show()
+# for i in range(3):
+#     # ax[1, i].plot(range(num_gt), gt.r[:, i] - p_est_euler[:num_gt, i])
+#     ax[1, i].plot(range(num_gt), 3 * p_cov_diag_std[:num_gt, i+6], 'r--')
+#     ax[1, i].plot(range(num_gt), -3 * p_cov_diag_std[:num_gt, i+6], 'r--')
+#     ax[1, i].set_title(titles[i+3])
+# plt.show()
