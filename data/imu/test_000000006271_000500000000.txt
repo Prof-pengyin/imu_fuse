@@ -1,0 +1,6 @@
+angvel_x: 0.002
+angvel_y: -0.002
+angvel_z: 0.007
+lineacce_x: -2.28573
+lineacce_y: 0.71613
+lineacce_z: -9.69228
