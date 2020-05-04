@@ -20,3 +20,4 @@ var_cam = 0.1
 ```
 Right now the data is updated based on all your cam inputs: **[height, roll, pitch]**.
 
+![alt text](https://github.com/maxtomCMU/imu_fuse/blob/master/data/traj.png "Logo Title Text 1")
